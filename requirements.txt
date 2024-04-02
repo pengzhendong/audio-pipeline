@@ -1,5 +1,7 @@
 click
 # demucs
 ffmpeg-python
+librosa
 loguru
 tqdm
+https://github.com/pengzhendong/silero-vad/archive/refs/heads/master.zip

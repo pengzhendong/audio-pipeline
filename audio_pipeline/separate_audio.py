@@ -148,7 +148,7 @@ def worker(
     skipped = 0
     for file in tqdm(
         files,
-        desc=f"{shard_name} separating audio",
+        desc=f"{shard_name} Separating audio",
         position=0 if shard_idx < 0 else shard_idx,
         leave=False,
     ):
