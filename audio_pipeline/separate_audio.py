@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from functools import partial
 import multiprocessing as mp
 from pathlib import Path
 from typing import Optional, Union
@@ -22,7 +23,7 @@ from loguru import logger
 import torch
 from tqdm import tqdm
 
-from utils.file import AUDIO_EXTENSIONS, list_files, make_dirs
+from utils.file import AUDIO, list_files, make_dirs
 
 
 def init_model(
@@ -36,7 +37,6 @@ def init_model(
         name: Name of the model
         device: Device to use
         segment: Set split size of each chunk. This can help save memory of graphic card.
-
     Returns:
         The model
     """
@@ -44,18 +44,12 @@ def init_model(
     model = pretrained.get_model(name)
     model.eval()
 
-    if device is not None:
+    if device:
         model.to(device)
     logger.info(f"Model {name} loaded on {device}")
 
-    if isinstance(model, apply.BagOfModels) and len(model.models) > 1:
-        logger.info(
-            f"Selected model is a bag of {len(model.models)} models. "
-            f"You will see {len(model.models)} progress bars per track."
-        )
-
-    if segment is not None:
-        if isinstance(model, BagOfModels):
+    if segment:
+        if isinstance(model, apply.BagOfModels):
             for m in model.models:
                 m.segment = segment
         else:
@@ -76,9 +70,8 @@ def separate_audio(
         model: The model
         audio_path: The audio path
         shifts: Run the model N times, larger values will increase the quality but also the time
-        num_workers: Number of workers to use
+        num_workers: if non zero, device is 'cpu', how many threads to use in parallel
         progress: Show progress bar
-
     Returns:
         The separated tracks
     """
@@ -110,7 +103,6 @@ def merge_tracks(
     Args:
         tracks: The separated audio tracks
         filter: The tracks to merge
-
     Returns:
         The merged audio
     """
@@ -132,11 +124,12 @@ def worker(
     track: list[str],
     model: str,
     shifts: int,
-    device: "torch.device",
+    device: torch.device,
     shard_idx: int = -1,
     total_shards: int = 1,
+    num_workers: int = 0,
 ):
-    files = list_files(input_dir, extensions=AUDIO_EXTENSIONS, recursive=recursive)
+    files = list_files(input_dir, extensions=AUDIO, recursive=recursive)
     if shard_idx >= 0:
         files = [f for i, f in enumerate(files) if i % total_shards == shard_idx]
     shard_name = f"[Shard {shard_idx + 1}/{total_shards}]"
@@ -144,7 +137,8 @@ def worker(
     if len(files) == 0:
         return
 
-    _model = init_model(model, device)
+    # TODO: init model outside
+    model = init_model(model, device)
     skipped = 0
     for file in tqdm(
         files,
@@ -152,50 +146,36 @@ def worker(
         position=0 if shard_idx < 0 else shard_idx,
         leave=False,
     ):
-        # Get relative path to input_dir
-        relative_path = file.relative_to(input_dir)
-        new_file = output_dir / relative_path
-        if new_file.parent.exists() is False:
-            new_file.parent.mkdir(parents=True)
-        if new_file.exists() and overwrite is False:
+        fout = output_dir / file.relative_to(input_dir)
+        if not fout.parent.exists():
+            fout.parent.mkdir(parents=True)
+        if fout.exists() and not overwrite:
             skipped += 1
             continue
 
-        separated = separate_audio(_model, file, shifts=shifts, num_workers=0)
-        merged = merge_tracks(separated, track)[2 - num_channels:]
-        audio.save_audio(
-            merged,
-            new_file,
-            _model.samplerate,
-            clip="rescale",
-            as_float=False,
-            bits_per_sample=16,
-        )
+        if device.type == "cuda":
+            num_workers = 0
+        separated = separate_audio(model, file, shifts=shifts, num_workers=num_workers)
+        merged = merge_tracks(separated, track)[2 - num_channels :]
+        audio.save_audio(merged, fout, model.samplerate)
 
-    logger.info(f"Done!")
+    logger.info("Done!")
     logger.info(f"Total: {len(files)}, Skipped: {skipped}")
     logger.info(f"Output directory: {output_dir}")
 
 
 @click.command()
 @click.argument("input_dir", type=click.Path(exists=True, file_okay=False))
-@click.argument("output_dir", type=click.Path(exists=False, file_okay=False))
+@click.argument("output_dir", type=click.Path(file_okay=False))
 @click.option("--num-channels", default=1, help="Num channels of output files")
 @click.option("--recursive/--no-recursive", default=True, help="Search recursively")
-@click.option(
-    "--overwrite/--no-overwrite", default=False, help="Overwrite existing files"
-)
-@click.option(
-    "--clean/--no-clean", default=False, help="Clean output directory before processing"
-)
-@click.option(
-    "--track", "-t", multiple=True, help="Name of track to keep", default=["vocals"]
-)
+@click.option("--overwrite/--no-overwrite", default=False, help="Overwrite outputs")
+@click.option("--clean/--no-clean", default=False, help="Clean outputs before")
+@click.option("--track", "-t", multiple=True, default=["vocals"], help="Target tracks")
 @click.option("--model", help="Name of model to use", default="htdemucs")
-@click.option(
-    "--shifts", help="Number of shifts, improves separation quality a bit", default=1
-)
-@click.option("--num_workers_per_gpu", help="Number of workers per GPU", default=2)
+@click.option("--shifts", default=1, help="Larger shifts will improve quality a bit")
+@click.option("--num_workers_per_gpu", default=2, help="Number of workers per GPU")
+@click.option("--num-workers", default=8, help="Number of workers to use without GPU")
 def main(
     input_dir: str,
     output_dir: str,
@@ -207,6 +187,7 @@ def main(
     model: str,
     shifts: int,
     num_workers_per_gpu: int,
+    num_workers: int,
 ):
     """
     Separates audio in input_dir using model and saves to output_dir.
@@ -218,44 +199,41 @@ def main(
         return
 
     make_dirs(output_dir, clean)
-    base_args = (
-        input_dir,
-        output_dir,
-        num_channels,
-        recursive,
-        overwrite,
-        track,
-        model,
-        shifts,
+    fn = partial(
+        worker,
+        input_dir=input_dir,
+        output_dir=output_dir,
+        num_channels=num_channels,
+        recursive=recursive,
+        overwrite=overwrite,
+        track=track,
+        model=model,
+        shifts=shifts,
+        num_workers=num_workers,
     )
 
-    if torch.cuda.is_available() and torch.cuda.device_count() >= 1:
-        logger.info(f"Device has {torch.cuda.device_count()} GPUs, let's use them!")
+    gpu_count = torch.cuda.device_count()
+    if torch.cuda.is_available() and gpu_count >= 1:
+        logger.info(f"Device has {gpu_count} GPUs, let's use them!")
         mp.set_start_method("spawn")
 
         processes = []
-        shards = torch.cuda.device_count() * num_workers_per_gpu
+        shards = gpu_count * num_workers_per_gpu
         for shard_idx in range(shards):
             p = mp.Process(
-                target=worker,
-                args=(
-                    *base_args,
-                    torch.device(f"cuda:{shard_idx % torch.cuda.device_count()}"),
-                    shard_idx,
-                    shards,
-                ),
+                target=fn,
+                kwargs={
+                    "device": torch.device(f"cuda:{shard_idx % gpu_count}"),
+                    "shard_idx": shard_idx,
+                    "total_shards": shards,
+                },
             )
             p.start()
             processes.append(p)
-
         for p in processes:
             p.join()
-        return
-
-    worker(
-        *base_args,
-        torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-    )
+    else:
+        fn(device=torch.device("cpu"))
 
 
 if __name__ == "__main__":

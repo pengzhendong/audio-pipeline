@@ -1,7 +1,8 @@
 click
-# demucs
+demucs
+ffmpeg-normalize
 ffmpeg-python
 librosa
 loguru
 tqdm
-https://github.com/pengzhendong/silero-vad/archive/refs/heads/master.zip
+git+https://github.com/m-bain/whisperx.git
