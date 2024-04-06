@@ -1,10 +1,7 @@
 # audio-pipeline
 
-1. extract
-2. slice
-3. filter
-4. speaker embedding
-5. seperate
-6. merge
-7. loudnorm
-8. asr
+1. ffmpeg extract
+2. whisperx transcribe & slice
+3. *demucs seperate
+4. ffmpeg loudnorm
+5. merge short
