@@ -1,8 +1,8 @@
 click
 demucs
-ffmpeg-normalize
 ffmpeg-python
 librosa
 loguru
+pyrnnoise
 tqdm
 git+https://github.com/m-bain/whisperx.git

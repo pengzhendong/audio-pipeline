@@ -2,6 +2,6 @@
 
 1. ffmpeg extract
 2. whisperx transcribe & slice
-3. *demucs seperate
-4. ffmpeg loudnorm
+3. denoise | seperate
+4. loudnorm
 5. merge short
