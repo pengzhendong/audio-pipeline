@@ -23,13 +23,7 @@ from tqdm.contrib.concurrent import thread_map
 from utils.file import list_files, make_dirs
 
 
-def extract(
-    input: str,
-    output: str,
-    sampling_rate: str,
-    stream: int = 0,
-    channel: int = 0,
-):
+def extract(input, output, sampling_rate, stream=0, channel=0):
     # https://trac.ffmpeg.org/wiki/audio%20types
     # https://trac.ffmpeg.org/wiki/AudioChannelManipulation
     (
