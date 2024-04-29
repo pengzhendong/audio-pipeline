@@ -25,8 +25,8 @@ from utils.file import list_files, make_dirs
 
 def denoise(in_wav, out_wav):
     denoiser = RNNoise(sf.info(in_wav).samplerate)
-    for speech_prob in denoiser.process_wav(in_wav, out_wav):
-        yield speech_prob
+    speech_probs = list(denoiser.process_wav(in_wav, out_wav))
+    return speech_probs
 
 
 @click.command()

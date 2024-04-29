@@ -15,10 +15,9 @@
 from pathlib import Path
 
 import click
+import soundfile as sf
 from loguru import logger
 from silero_vad import SileroVAD
-from tqdm import tqdm
-import soundfile as sf
 from tqdm.contrib.concurrent import thread_map
 
 from utils.file import list_files, make_dirs

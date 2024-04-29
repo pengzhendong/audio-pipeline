@@ -18,9 +18,9 @@ from pathlib import Path
 from typing import Optional, Union
 
 import click
+import torch
 from demucs import apply, audio, pretrained, separate
 from loguru import logger
-import torch
 from tqdm import tqdm
 
 from utils.file import AUDIO, list_files, make_dirs

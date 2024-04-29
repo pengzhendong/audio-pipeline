@@ -16,9 +16,9 @@ from functools import partial
 from pathlib import Path
 
 import click
-from loguru import logger
 import pyloudnorm as pyln
 import soundfile as sf
+from loguru import logger
 from tqdm.contrib.concurrent import thread_map
 
 from utils.file import list_files, make_dirs
@@ -74,7 +74,7 @@ def main(
 
     make_dirs(output_dir, clean)
     files = list_files(input_dir, recursive=recursive)
-    logger.info(f"Found {len(files)} files, extracting specified channel to mono wav")
+    logger.info(f"Found {len(files)} files, processing...")
 
     skipped = 0
     args = []
