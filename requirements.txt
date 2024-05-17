@@ -1,8 +1,11 @@
+audio-separator[cpu]
+# audio-separator[gpu]
 click
 demucs
 ffmpeg-python
 librosa
 loguru
+pyloudnorm
 pyrnnoise
 tqdm
 git+https://github.com/m-bain/whisperx.git

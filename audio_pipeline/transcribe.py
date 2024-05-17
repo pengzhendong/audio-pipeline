@@ -16,22 +16,12 @@ from functools import partial
 from pathlib import Path
 
 import click
-import soundfile as sf
-import whisperx
 from loguru import logger
 from modelscope.pipelines import pipeline
 from modelscope.utils.constant import Tasks
-from silero_vad import SileroVAD
 from tqdm.contrib.concurrent import thread_map
 
-from utils.file import list_files, make_dirs
-
-
-def trans(in_wav, out_txt, model):
-    audio = whisperx.load_audio(in_wav)
-    text = model.transcribe(audio, batch_size=16)[0]["text"]
-    with open(out_txt, "w") as fout:
-        fout.write(f"{in_wav}\t{text}\n")
+from audio_pipeline.utils import list_files, make_dirs
 
 
 def trans_zh(in_wav, out_txt, inference_pipeline):
@@ -48,7 +38,12 @@ def trans_zh(in_wav, out_txt, inference_pipeline):
 @click.option("--clean/--no-clean", default=False, help="Clean outputs before")
 @click.option("--num-workers", default=1, help="Number of workers to use")
 def main(
-    input_dir: str, output_dir: str, recursive: bool, overwrite: bool, clean: bool, num_workers: int
+    input_dir: str,
+    output_dir: str,
+    recursive: bool,
+    overwrite: bool,
+    clean: bool,
+    num_workers: int,
 ):
     input_dir, output_dir = Path(input_dir), Path(output_dir)
     if input_dir == output_dir and clean:
