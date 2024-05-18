@@ -12,74 +12,48 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from functools import partial
-from pathlib import Path
-
 import click
 from loguru import logger
-from modelscope.pipelines import pipeline
-from modelscope.utils.constant import Tasks
-from tqdm.contrib.concurrent import thread_map
 
-from audio_pipeline.utils import list_files, make_dirs
-
-
-def trans_zh(in_wav, out_txt, inference_pipeline):
-    text = inference_pipeline(in_wav)[0]["text"]
-    with open(out_txt, "w") as fout:
-        fout.write(f"{in_wav}\t{text}\n")
+import utils
 
 
 @click.command()
-@click.argument("input_dir", type=click.Path(exists=True, file_okay=False))
-@click.argument("output_dir", type=click.Path(file_okay=False))
-@click.option("--recursive/--no-recursive", default=True, help="Search recursively")
+@click.argument("wav_scp", type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    "--model",
+    type=click.Choice(["paraformer", "whisper"]),
+    default="paraformer",
+    help="ASR model",
+)
+@click.option(
+    "--language",
+    type=click.Choice(["en", "zh"]),
+    default="zh",
+    help="ASR language",
+)
+@click.option("--asr/--no-asr", default=True, help="Do ASR")
+@click.option("--batch_size", default=16, help="Batch size for ASR")
+@click.option("--panns/--no-panns", default=False, help="Get audio tags")
+@click.option("--pyannote/--no-pyannote", default=False, help="Get num of speakers")
 @click.option("--overwrite/--no-overwrite", default=False, help="Overwrite outputs")
-@click.option("--clean/--no-clean", default=False, help="Clean outputs before")
 @click.option("--num-workers", default=1, help="Number of workers to use")
 def main(
-    input_dir: str,
-    output_dir: str,
-    recursive: bool,
-    overwrite: bool,
-    clean: bool,
-    num_workers: int,
+    wav_scp, model, language, asr, panns, pyannote, overwrite, num_workers, batch_size
 ):
-    input_dir, output_dir = Path(input_dir), Path(output_dir)
-    if input_dir == output_dir and clean:
-        logger.error("You are trying to clean the input directory, aborting")
-        return
-
-    make_dirs(output_dir, clean)
-    files = list_files(input_dir, recursive=recursive)
-    logger.info(f"Found {len(files)} files, processing...")
-
-    # model = whisperx.load_model("large-v3", "cuda", compute_type="float16")
-    # fn = partial(trans, model=model)
-    inference_pipeline = pipeline(
-        task=Tasks.auto_speech_recognition,
-        model="iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
-        model_revision="v2.0.4",
-    )
-    fn = partial(trans_zh, inference_pipeline=inference_pipeline)
-
-    skipped = 0
-    args = []
-    for fin in files:
-        fout = output_dir / fin.relative_to(input_dir).with_suffix(".txt")
-        if not fout.parent.exists():
-            fout.parent.mkdir(parents=True)
-        if fout.exists() and not overwrite:
-            skipped += 1
-            continue
-        args.append([str(fin), str(fout)])
-
-    if len(files) > 0:
-        thread_map(fn, *zip(*args), max_workers=num_workers)
-
+    if asr:
+        if model == "paraformer":
+            processor = utils.paraformer_transcribe
+        elif model == "whisper":
+            processor = utils.whisper_transcribe
+        utils.transcribe_audios(wav_scp, processor, overwrite, num_workers, batch_size)
+    if panns:
+        utils.transcribe_audios(wav_scp, utils.panns_tags, overwrite, num_workers)
+    if pyannote:
+        utils.transcribe_audios(
+            wav_scp, utils.pyannote_speakers, overwrite, num_workers
+        )
     logger.info("Done!")
-    logger.info(f"Total: {len(files)}, Skipped: {skipped}")
-    logger.info(f"Output directory: {output_dir}")
 
 
 if __name__ == "__main__":

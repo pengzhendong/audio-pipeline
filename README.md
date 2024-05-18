@@ -1,9 +1,12 @@
 # audio-pipeline
 
-1. ffmpeg extract
-2. seperate | denoise
-3. loudnorm
-4. slice
-5. transcribe (paraformer vs. whisperx)
-6. punctuation prediction
-7. merge short
+1. pipeline
+  - ffmpeg extract
+  - loudnorm
+  - uvr seperate
+  - rnnoise denoise
+  - vad slice
+2. transcribe
+  - paraformer vs. whisperx
+  - panns audio tags
+  - pyannote num of speakers

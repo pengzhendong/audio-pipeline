@@ -1,11 +1,19 @@
 audio-separator[cpu]
 # audio-separator[gpu]
 click
-demucs
+Cython
 ffmpeg-python
-librosa
-loguru
-pyloudnorm
-pyrnnoise
-tqdm
+funasr
 git+https://github.com/m-bain/whisperx.git
+loguru
+model[auido] -f https://modelscope.oss-cn-beijing.aliyuncs.com/releases/repo.html
+panns_inference
+pyannote-onnx
+pydub
+pyloudnorm
+pyopenhc
+pyrnnoise
+silero-vad
+soundfile
+tqdm
+WeTextProcessing

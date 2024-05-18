@@ -19,21 +19,36 @@ from functools import partial
 from pathlib import Path
 
 import ffmpeg
+import numpy as np
 import pyloudnorm as pyln
 import soundfile as sf
+import whisperx
 from audio_separator.separator import Separator
+from funasr import AutoModel
 from loguru import logger
+from panns_inference import AudioTagging, labels
+from pyopenhc import OpenHC
+from pyannote_onnx import PyannoteONNX
 from pydub import AudioSegment
 from pyrnnoise import RNNoise
 from silero_vad import SileroVAD
+from tn.chinese.normalizer import Normalizer
 from tqdm.contrib.concurrent import thread_map
 
 
-AUDIO = "aac|alac|flac|m4a|m4b|m4p|mp3|ogg|opus|wav|wma"
+AUDIO = "aac|alac|flac|m4a|m4b|m4p|mp3|mp4a|ogg|opus|wav|wma"
 VIDEO = "avi|flv|m4v|mkv|mov|mp4|mpeg|mpg|wmv"
 
-separator = Separator()
+converter = None
+normalizer = None
+panns_model = None
+pyannote_model = None
+separator = None
 vad_model = SileroVAD()
+panns_labels = []
+for label in labels:
+    label = label.lower().split(", ")[0].replace(" ", "_")
+    panns_labels.append(label)
 
 
 def listdir(path, extensions="|".join([AUDIO, VIDEO]), recursive=False, sort=True):
@@ -89,52 +104,52 @@ def mkdir(path, clean=False):
             logger.info(f"Output directory already exists: {path}")
 
 
-def extract(in_path, out_path, sampling_rate, stream=0, channel=0):
+def generate_paths(in_dir, out_dir, recursive=False, clean=False):
+    """
+    Generate input and output paths.
+
+    Args:
+        in_dir: input directory.
+        out_dir: output directory.
+        recursive: search recursively.
+        clean: clean output directory if exists.
+    """
+    in_paths = []
+    out_paths = []
+    if in_dir == out_dir and clean:
+        logger.error("You are trying to clean the input directory, aborting.")
+        return in_paths, out_paths
+
+    files = listdir(in_dir, recursive=recursive)
+    for in_path in files:
+        out_path = Path(out_dir) / in_path.relative_to(in_dir).with_suffix(".wav")
+        if not out_path.parent.exists():
+            out_path.parent.mkdir(parents=True)
+        in_paths.append(in_path)
+        out_paths.append(out_path)
+    return in_paths, out_paths
+
+
+def extract(in_path, out_path, stream=0, channel=0, sampling_rate=None):
     """
     Extract a mono audio from a multi-channel audio or video file.
 
     Args:
         in_path: A multi-channel audio or video file.
         out_path: The output mono audio file.
-        sampling_rate: Sampling rate of the outputs.
         stream: Stream index of the audio to extract. Defaults to 0.
         channel: Channel index of the stream to extract. Defaults to 0.
+        sampling_rate: Sampling rate of the outputs.
     """
     # https://trac.ffmpeg.org/wiki/audio%20types
     # https://trac.ffmpeg.org/wiki/AudioChannelManipulation
-    (
-        ffmpeg.input(in_path)[f"a:{stream}"]
-        .filter("pan", **{"mono|c0": f"c{channel}"})
-        .filter("aresample", sampling_rate)
-        .output(str(out_path), loglevel="quiet", stats=None)
-        .overwrite_output()
-        .run()
-    )
-
-
-def to_mono(in_path, out_path):
-    """
-    Extract a mono audio from a multi-channel audio file.
-
-    Args:
-        in_path: The input stereo audio file.
-        out_path: The output mono audio file.
-    """
-    (AudioSegment.from_wav(in_path).set_channels(1).export(out_path, format="wav"))
-
-
-def denoise(in_path, out_path):
-    """
-    Denoise an audio file.
-
-    Args:
-        in_path: input audio file.
-        out_path: output audio file.
-    Returns:
-        speech_probs: speech probabilities
-    """
-    denoiser = RNNoise(sf.info(in_path).samplerate)
-    return list(denoiser.process_wav(in_path, out_path))
+    stream = ffmpeg.input(in_path)[f"a:{stream}"]
+    stream = ffmpeg.filter(stream, "pan", **{"mono|c0": f"c{channel}"})
+    if sampling_rate is not None:
+        stream = ffmpeg.filter(stream, "aresample", sampling_rate)
+    stream = ffmpeg.output(stream, str(out_path), loglevel="quiet", stats=None)
+    stream = ffmpeg.overwrite_output(stream)
+    ffmpeg.run(stream)
 
 
 def loudnorm(in_path, out_path, peak=-1.0, loudness=-23.0, block_size=0.400):
@@ -155,6 +170,20 @@ def loudnorm(in_path, out_path, peak=-1.0, loudness=-23.0, block_size=0.400):
     loudness = pyln.Meter(sample_rate, block_size=block_size).integrated_loudness(audio)
     audio = pyln.normalize.loudness(audio, loudness, loudness)
     sf.write(out_path, audio, sample_rate)
+
+
+def denoise(in_path, out_path):
+    """
+    Denoise an audio file.
+
+    Args:
+        in_path: input audio file.
+        out_path: output audio file.
+    Returns:
+        speech_probs: speech probabilities
+    """
+    denoiser = RNNoise(sf.info(in_path).samplerate)
+    return list(denoiser.process_wav(in_path, out_path))
 
 
 def vad(in_path, save_path, speech_pad_ms=30, min_silence_duration_ms=100):
@@ -178,7 +207,7 @@ def vad(in_path, save_path, speech_pad_ms=30, min_silence_duration_ms=100):
     return list(timestamps)
 
 
-def process_audios(in_paths, out_paths, processor, overwrite, num_workers, suffix=None):
+def process_audios(in_paths, out_paths, processor, overwrite, num_workers):
     """
     Process audio files concurrently.
 
@@ -186,27 +215,27 @@ def process_audios(in_paths, out_paths, processor, overwrite, num_workers, suffi
         in_paths: input audio files.
         output_paths: output audio files.
         processor: processor function.
-        suffix: suffix of output file name.
         overwrite: overwrite outputs.
         num_workers: number of workers to use.
     """
-    if suffix is None:
-        suffix = (
-            f".{processor.func.__name__}"
-            if isinstance(processor, partial)
-            else f".{processor.__name__}"
-        )
-
     args = []
-    _out_paths = []
     for in_path, out_path in zip(in_paths, out_paths):
-        out_path = out_path.with_stem(f"{in_path.stem}{suffix}")
-        _out_paths.append(out_path)
+        out_path = out_path.with_stem(in_path.stem)
         if not out_path.exists() or overwrite:
             args.append([in_path, out_path])
     if len(args) > 0:
         thread_map(processor, *zip(*args), max_workers=num_workers)
-    return _out_paths
+
+
+def to_mono(in_path, out_path):
+    """
+    Extract a mono audio from a multi-channel audio file.
+
+    Args:
+        in_path: The input stereo audio file.
+        out_path: The output mono audio file.
+    """
+    AudioSegment.from_wav(in_path).set_channels(1).export(out_path, format="wav")
 
 
 def separate_audios(in_paths, out_paths, overwrite):
@@ -218,20 +247,141 @@ def separate_audios(in_paths, out_paths, overwrite):
         output_paths: output audio files.
         overwrite: overwrite outputs.
     """
-    if separator.model_instance is None:
+    global separator
+    if separator is None:
+        separator = Separator()
         separator.load_model()
         # separator.load_model(model_filename="Kim_Vocal_1.onnx")
     model_name = separator.model_instance.model_name
 
-    _out_paths = []
     for in_path, out_path in zip(in_paths, out_paths):
         # change the output_dir of the separator
         separator.model_instance.output_dir = out_path.parent
-        out_path = out_path.with_stem(f"{in_path.stem}_(Vocals)_{model_name}")
-        # convert the stereo vocals to mono vocals
-        mono_vocals = out_path.with_stem(f"{in_path.stem}.vocals")
-        _out_paths.append(mono_vocals)
+        instrumental = out_path.with_stem(f"{in_path.stem}_(Instrumental)_{model_name}")
+        vocals = out_path.with_stem(f"{in_path.stem}_(Vocals)_{model_name}")
         if not out_path.exists() or overwrite:
-            assert out_path.name in separator.separate(in_path)
-            to_mono(out_path, mono_vocals)
-    return _out_paths
+            paths = separator.separate(in_path)
+            assert vocals.name == paths[0]
+            assert instrumental.name == paths[1]
+            os.remove(instrumental)
+            # convert the stereo vocals to mono
+            to_mono(vocals, out_path)
+            os.remove(vocals)
+
+
+def paraformer_transcribe(in_wav, out_txt, model, batch_size):
+    """
+    Transcribe audio files using Paraformer.
+
+    Args:
+        in_wav: input audio file.
+        out_txt: output text file.
+        model: funasr auto model.
+        batch_size: batch size for decoding.
+    """
+    segments = model.generate(in_wav, batch_size_s=batch_size)
+    text = ""
+    for segment in segments:
+        text += segment["text"]
+    with open(out_txt, "w", encoding="utf-8") as fout:
+        fout.write(f"{in_wav}\t{text}\n")
+
+
+def whisper_transcribe(in_wav, out_txt, model, language, batch_size):
+    """
+    Transcribe audio files using Whisper.
+
+    Args:
+        in_wav: input audio file.
+        out_txt: output text file.
+        model: whisper model.
+        language: language spoken in the audio.
+        batch_size: batch size for decoding.
+    """
+    audio = whisperx.load_audio(in_wav)
+    segments = model.transcribe(audio, language=language, batch_size=batch_size)[
+        "segments"
+    ]
+    text = ""
+    for segment in segments:
+        text += segment["text"]
+    with open(out_txt, "w", encoding="utf-8") as fout:
+        if language == "zh":
+            text = converter.convert(text)
+            text = normalizer.normalize(text)
+        fout.write(f"{in_wav}\t{text}\n")
+
+
+def pyannote_speakers(in_wav, out_txt):
+    num_speakers = pyannote_model.get_num_speakers(in_wav)
+    with open(out_txt, "w", encoding="utf-8") as fout:
+        fout.write(f"{in_wav}\t{num_speakers}\n")
+
+
+def panns_tags(in_wav, out_txt):
+    audio, sample_rate = sf.read(in_wav)
+    clipwise_output, _ = panns_model.inference(audio[None, :])
+    clipwise_output = clipwise_output[0]
+    sorted_indexes = np.argsort(clipwise_output)[::-1]
+    with open(out_txt, "w", encoding="utf-8") as fout:
+        tags = ""
+        labels = np.array(panns_labels)
+        # 0. Speech
+        # 1. Male speech, man speaking
+        # 2. Female speech, woman speaking
+        # 3. Child speech, kid speaking
+        # 4. Conversation
+        # 5. Narration, monologue
+        # 7 - 526: Non speech
+        for k in range(3):
+            index = sorted_indexes[k]
+            tags += f" {panns_labels[index]}:{clipwise_output[index]:.2f}"
+        fout.write(f"{in_wav}\t{tags}\n")
+
+
+def transcribe_audios(wav_scp, processor, overwrite, num_workers, batch_size=1):
+    """
+    Transcribe audio files using Paraformer or Whisper.
+
+    Args:
+        wav_scp: input wav scp, each line contains the path to the audio file.
+        processor: processor function.
+        overwrite: overwrite outputs.
+        num_workers: number of workers to use.
+        batch_size: batch size for transcribing.
+    """
+    suffix = processor.__name__.split("_")[0]
+
+    global converter
+    global normalizer
+    global panns_model
+    global pyannote_model
+    if suffix == "paraformer":
+        model = AutoModel(
+            model="paraformer-zh", vad_model="fsmn-vad", punc_model="ct-punc-c"
+        )
+        processor = partial(processor, model=model, batch_size=batch_size)
+    elif suffix == "whisper":
+        if converter is None:
+            converter = OpenHC("t2s")
+        if normalizer is None:
+            normalizer = Normalizer()
+        model = whisperx.load_model("large-v3", "cuda", compute_type="float16")
+        processor = partial(
+            whisper_transcribe, model=model, batch_size=batch_size, language="zh"
+        )
+    elif suffix == "panns" and panns_model is None:
+        panns_model = AudioTagging()
+        # panns_model = AudioTagging("panns_data/Cnn14_mAP=0.431.pth")
+    elif suffix == "pyannote" and pyannote_model is None:
+        pyannote_model = PyannoteONNX()
+
+    args = []
+    for line in open(wav_scp, encoding="utf-8"):
+        in_wav = Path(line.strip())
+        out_txt = in_wav.with_suffix(f".{suffix}.txt")
+        if out_txt.exists() and not overwrite:
+            continue
+        args.append([str(in_wav), str(out_txt)])
+    if len(args) > 0:
+        thread_map(processor, *zip(*args), max_workers=num_workers, desc=suffix)
