@@ -22,17 +22,13 @@ import ffmpeg
 import numpy as np
 import pyloudnorm as pyln
 import soundfile as sf
-import whisperx
-from audio_separator.separator import Separator
 from funasr import AutoModel
 from loguru import logger
 from panns_inference import AudioTagging, labels
-from pyopenhc import OpenHC
 from pyannote_onnx import PyannoteONNX
 from pydub import AudioSegment
 from pyrnnoise import RNNoise
 from silero_vad import SileroVAD
-from tn.chinese.normalizer import Normalizer
 from tqdm.contrib.concurrent import thread_map
 
 
@@ -182,7 +178,8 @@ def denoise(in_path, out_path):
     Returns:
         speech_probs: speech probabilities
     """
-    denoiser = RNNoise(sf.info(in_path).samplerate)
+    info = sf.info(in_path)
+    denoiser = RNNoise(info.samplerate, info.channels)
     return list(denoiser.process_wav(in_path, out_path))
 
 
@@ -196,15 +193,22 @@ def vad(in_path, save_path, speech_pad_ms=30, min_silence_duration_ms=100):
         speech_pad_ms: final speech chunks are padded by speech_pad_ms each side.
         min_silence_duration_ms: in the end of each speech chunk wait for min_silence_duration_ms before separating it.
     """
+    done = Path(os.path.join(save_path, "done"))
+    if done.exists():
+        return []
     vad_model.reset_states()
-    timestamps = vad_model.get_speech_timestamps(
+    timestamps = list(vad_model.get_speech_timestamps(
         in_path,
         save_path=save_path,
         flat_layout=False,
         speech_pad_ms=speech_pad_ms,
         min_silence_duration_ms=min_silence_duration_ms,
-    )
-    return list(timestamps)
+    ))
+    if done.parent.exists():
+        done.touch()
+    else:
+        logger.warning(f"The output result of vad is empty: {in_path}")
+    return timestamps
 
 
 def process_audios(in_paths, out_paths, processor, overwrite, num_workers):
@@ -221,7 +225,7 @@ def process_audios(in_paths, out_paths, processor, overwrite, num_workers):
     args = []
     for in_path, out_path in zip(in_paths, out_paths):
         out_path = out_path.with_stem(in_path.stem)
-        if not out_path.exists() or overwrite:
+        if overwrite or not out_path.is_file() or not out_path.exists():
             args.append([in_path, out_path])
     if len(args) > 0:
         thread_map(processor, *zip(*args), max_workers=num_workers)
@@ -249,6 +253,8 @@ def separate_audios(in_paths, out_paths, overwrite):
     """
     global separator
     if separator is None:
+        from audio_separator.separator import Separator
+
         separator = Separator()
         separator.load_model()
         # separator.load_model(model_filename="Kim_Vocal_1.onnx")
@@ -363,9 +369,15 @@ def transcribe_audios(wav_scp, processor, overwrite, num_workers, batch_size=1):
         processor = partial(processor, model=model, batch_size=batch_size)
     elif suffix == "whisper":
         if converter is None:
+            from pyopenhc import OpenHC
+
             converter = OpenHC("t2s")
         if normalizer is None:
+            from tn.chinese.normalizer import Normalizer
+
             normalizer = Normalizer()
+        import whisperx
+
         model = whisperx.load_model("large-v3", "cuda", compute_type="float16")
         processor = partial(
             whisper_transcribe, model=model, batch_size=batch_size, language="zh"

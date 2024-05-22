@@ -1,6 +1,7 @@
 in_dir=
 out_dir=
 separate=
+denoise=
 wer_threshold=5
 
 stage=0
@@ -12,10 +13,15 @@ if [ ${stage} -le 0 ] && [ ${stop_stage} -ge 0 ]; then
   if [ "$separate" = true ]; then
     separate="--separate"
   fi
-  python audio_pipeline/pipeline.py $in_dir $out_dir $separate
+  if [ "$denoise" = true ]; then
+    denoise="--denoise"
+  fi
+  python audio_pipeline/pipeline.py $in_dir $out_dir $separate $denoise
 fi
 
 if [ ${stage} -le 1 ] && [ ${stop_stage} -ge 1 ]; then
+  # Perform tanscribing on the audio output by vad instead of the output by noise reduction.
+  find $(realpath $out_dir/slices) -name "*.wav" > $out_dir/wav.list
   python audio_pipeline/transcribe.py $out_dir/wav.list --panns --pyannote
   find $out_dir -name "*.paraformer.txt" -exec cat {} \; > $out_dir/paraformer.txt
   find $out_dir -name "*.panns.txt" -exec cat {} \; > $out_dir/panns.txt

@@ -1,19 +1,19 @@
-audio-separator[cpu]
+# audio-separator[cpu]
 # audio-separator[gpu]
 click
 Cython
 ffmpeg-python
 funasr
-git+https://github.com/m-bain/whisperx.git
+# git+https://github.com/m-bain/whisperx.git
 loguru
-model[auido] -f https://modelscope.oss-cn-beijing.aliyuncs.com/releases/repo.html
+modelscope[audio] -f https://modelscope.oss-cn-beijing.aliyuncs.com/releases/repo.html
 panns_inference
 pyannote-onnx
 pydub
 pyloudnorm
-pyopenhc
+# pyopenhc
 pyrnnoise
 silero-vad
 soundfile
 tqdm
-WeTextProcessing
+# WeTextProcessing

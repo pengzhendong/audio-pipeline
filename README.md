@@ -3,9 +3,9 @@
 1. pipeline
   - ffmpeg extract
   - loudnorm
+  - vad slice
   - uvr seperate
   - rnnoise denoise
-  - vad slice
 2. transcribe
   - paraformer vs. whisperx
   - panns audio tags

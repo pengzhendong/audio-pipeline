@@ -32,10 +32,10 @@ import utils
 @click.option("--clean/--no-clean", default=False, help="Clean outputs before")
 @click.option("--num-workers", default=4, help="Number of workers to use")
 @click.option("--extract/--no-extract", default=True, help="Extract audio with ffmpeg")
-@click.option("--separate/--no-separate", default=False, help="Separate vocals")
-@click.option("--denoise/--no-denoise", default=True, help="Denoise audios")
 @click.option("--loudnorm/--no-loudnorm", default=True, help="Loudnorm audios")
 @click.option("--vad/--no-vad", default=True, help="Slice long audios into slices")
+@click.option("--separate/--no-separate", default=False, help="Separate vocals of slices")
+@click.option("--denoise/--no-denoise", default=False, help="Denoise audio slices")
 def main(
     in_dir,
     out_dir,
@@ -47,10 +47,10 @@ def main(
     clean,
     num_workers,
     extract,
-    separate,
-    denoise,
     loudnorm,
     vad,
+    separate,
+    denoise,
 ):
     if extract:
         wavs = f"{out_dir}/wavs"
@@ -69,6 +69,14 @@ def main(
         )
         in_dir = normed
 
+    if vad:
+        slices = f"{out_dir}/slices"
+        in_paths, out_paths = utils.generate_paths(in_dir, slices, recursive, clean)
+        save_paths = [path.with_suffix("") for path in out_paths]
+        vad = partial(utils.vad, speech_pad_ms=30, min_silence_duration_ms=100)
+        utils.process_audios(in_paths, save_paths, vad, overwrite, num_workers)
+        in_dir = slices
+
     if separate:
         vocals = f"{out_dir}/vocals"
         in_paths, out_paths = utils.generate_paths(in_dir, vocals, recursive, clean)
@@ -81,16 +89,6 @@ def main(
         utils.process_audios(in_paths, out_paths, utils.denoise, overwrite, num_workers)
         in_dir = denoised
 
-    if vad:
-        slices = f"{out_dir}/slices"
-        in_paths, out_paths = utils.generate_paths(in_dir, slices, recursive, clean)
-        save_paths = [path.with_suffix("") for path in out_paths]
-        vad = partial(utils.vad, speech_pad_ms=30, min_silence_duration_ms=100)
-        utils.process_audios(in_paths, save_paths, vad, overwrite, num_workers)
-        with open(f"{out_dir}/wav.list", "w", encoding="utf-8") as fout:
-            for in_path, out_path in zip(in_paths, out_paths):
-                for file in utils.listdir(out_path.parent / in_path.stem):
-                    fout.write(f"{file.resolve()}\n")
 
     logger.info("Done!")
     logger.info(f"Output directory: {out_dir}")
