@@ -21,17 +21,17 @@ fi
 
 if [ ${stage} -le 1 ] && [ ${stop_stage} -ge 1 ]; then
   # Perform tanscribing on the audio output by vad instead of the output by noise reduction.
-  find $(realpath $out_dir/slices) -name "*.wav" > $out_dir/wav.list
-  python audio_pipeline/transcribe.py $out_dir/wav.list --panns --pyannote
-  find $out_dir -name "*.paraformer.txt" -exec cat {} \; > $out_dir/paraformer.txt
-  find $out_dir -name "*.panns.txt" -exec cat {} \; > $out_dir/panns.txt
-  find $out_dir -name "*.pyannote.txt" -exec cat {} \; > $out_dir/pyannote.txt
+  python audio_pipeline/transcribe.py $out_dir/slices $out_dir --detect-lang --panns --pyannote
+  find $out_dir/asr -name "*.paraformer.txt" -exec cat {} \; > $out_dir/paraformer.txt
+  find $out_dir/lang -name "*.txt" -exec cat {} \; > $out_dir/lang.txt
+  find $out_dir/tags -name "*.txt" -exec cat {} \; > $out_dir/tags.txt
+  find $out_dir/speakers -name "*.txt" -exec cat {} \; > $out_dir/speakers.txt
 fi
 
 # use whisper to double check the accuracy of paraformer
 if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then
-  python audio_pipeline/transcribe.py $out_dir/wav.scp --model whisper
-  find $out_dir -name "*.whisper.txt" -exec cat {} \; > $out_dir/whisper.txt
+  python audio_pipeline/transcribe.py $out_dir/slices $out_dir --model whisper
+  find $out_dir/asr -name "*.whisper.txt" -exec cat {} \; > $out_dir/whisper.txt
 
   python tools/compute-wer.py \
     --char=1 \

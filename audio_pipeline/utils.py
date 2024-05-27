@@ -19,11 +19,13 @@ from functools import partial
 from pathlib import Path
 
 import ffmpeg
+import librosa
 import numpy as np
 import pyloudnorm as pyln
 import soundfile as sf
 from funasr import AutoModel
 from loguru import logger
+from modelscope.pipelines import pipeline
 from panns_inference import AudioTagging, labels
 from pyannote_onnx import PyannoteONNX
 from pydub import AudioSegment
@@ -35,6 +37,7 @@ from tqdm.contrib.concurrent import thread_map
 AUDIO = "aac|alac|flac|m4a|m4b|m4p|mp3|mp4a|ogg|opus|wav|wma"
 VIDEO = "avi|flv|m4v|mkv|mov|mp4|mpeg|mpg|wmv"
 
+lre_pipeline = None
 converter = None
 normalizer = None
 panns_model = None
@@ -100,7 +103,7 @@ def mkdir(path, clean=False):
             logger.info(f"Output directory already exists: {path}")
 
 
-def generate_paths(in_dir, out_dir, recursive=False, clean=False):
+def generate_paths(in_dir, out_dir, recursive=False, clean=False, suffix=".wav"):
     """
     Generate input and output paths.
 
@@ -109,6 +112,7 @@ def generate_paths(in_dir, out_dir, recursive=False, clean=False):
         out_dir: output directory.
         recursive: search recursively.
         clean: clean output directory if exists.
+        suffix: suffix of the output files.
     """
     in_paths = []
     out_paths = []
@@ -118,7 +122,7 @@ def generate_paths(in_dir, out_dir, recursive=False, clean=False):
 
     files = listdir(in_dir, recursive=recursive)
     for in_path in files:
-        out_path = Path(out_dir) / in_path.relative_to(in_dir).with_suffix(".wav")
+        out_path = Path(out_dir) / in_path.relative_to(in_dir).with_suffix(suffix)
         if not out_path.parent.exists():
             out_path.parent.mkdir(parents=True)
         in_paths.append(in_path)
@@ -139,13 +143,18 @@ def extract(in_path, out_path, stream=0, channel=0, sampling_rate=None):
     """
     # https://trac.ffmpeg.org/wiki/audio%20types
     # https://trac.ffmpeg.org/wiki/AudioChannelManipulation
-    stream = ffmpeg.input(in_path)[f"a:{stream}"]
-    stream = ffmpeg.filter(stream, "pan", **{"mono|c0": f"c{channel}"})
-    if sampling_rate is not None:
-        stream = ffmpeg.filter(stream, "aresample", sampling_rate)
-    stream = ffmpeg.output(stream, str(out_path), loglevel="quiet", stats=None)
-    stream = ffmpeg.overwrite_output(stream)
-    ffmpeg.run(stream)
+    try:
+        stream = ffmpeg.input(in_path)[f"a:{stream}"]
+        stream = ffmpeg.filter(stream, "pan", **{"mono|c0": f"c{channel}"})
+        if sampling_rate is not None:
+            stream = ffmpeg.filter(stream, "aresample", sampling_rate)
+        stream = ffmpeg.output(stream, str(out_path), loglevel="quiet", stats=None)
+        stream = ffmpeg.overwrite_output(stream)
+        ffmpeg.run(stream)
+    except Exception as e:
+        error_log = out_path.with_suffix(".log")
+        with open(error_log, "w") as fout:
+            fout.write(f"{in_path}\n{e}\n")
 
 
 def loudnorm(in_path, out_path, peak=-1.0, loudness=-23.0, block_size=0.400):
@@ -159,28 +168,20 @@ def loudnorm(in_path, out_path, peak=-1.0, loudness=-23.0, block_size=0.400):
         loudness: loudness normalize audio to N dB LUFS. Defaults to -23.0.
         block_size: block size for loudness measurement. Defaults to 0.400. (400 ms)
     """
-    audio, sample_rate = sf.read(in_path)
-    # peak normalize audio to [peak] dB
-    audio = pyln.normalize.peak(audio, peak)
-    # measure the loudness first (BS.1770 meter)
-    loudness = pyln.Meter(sample_rate, block_size=block_size).integrated_loudness(audio)
-    audio = pyln.normalize.loudness(audio, loudness, loudness)
-    sf.write(out_path, audio, sample_rate)
-
-
-def denoise(in_path, out_path):
-    """
-    Denoise an audio file.
-
-    Args:
-        in_path: input audio file.
-        out_path: output audio file.
-    Returns:
-        speech_probs: speech probabilities
-    """
-    info = sf.info(in_path)
-    denoiser = RNNoise(info.samplerate, info.channels)
-    return list(denoiser.process_wav(in_path, out_path))
+    try:
+        audio, sample_rate = sf.read(in_path)
+        # peak normalize audio to [peak] dB
+        audio = pyln.normalize.peak(audio, peak)
+        # measure the loudness first (BS.1770 meter)
+        loudness = pyln.Meter(sample_rate, block_size=block_size).integrated_loudness(
+            audio
+        )
+        audio = pyln.normalize.loudness(audio, loudness, loudness)
+        sf.write(out_path, audio, sample_rate)
+    except Exception as e:
+        error_log = out_path.with_suffix(".log")
+        with open(error_log, "w") as fout:
+            fout.write(f"{in_path}\n{e}\n")
 
 
 def vad(in_path, save_path, speech_pad_ms=30, min_silence_duration_ms=100):
@@ -193,42 +194,49 @@ def vad(in_path, save_path, speech_pad_ms=30, min_silence_duration_ms=100):
         speech_pad_ms: final speech chunks are padded by speech_pad_ms each side.
         min_silence_duration_ms: in the end of each speech chunk wait for min_silence_duration_ms before separating it.
     """
-    done = Path(os.path.join(save_path, "done"))
-    if done.exists():
-        return []
-    vad_model.reset_states()
-    timestamps = list(vad_model.get_speech_timestamps(
-        in_path,
-        save_path=save_path,
-        flat_layout=False,
-        speech_pad_ms=speech_pad_ms,
-        min_silence_duration_ms=min_silence_duration_ms,
-    ))
-    if done.parent.exists():
-        done.touch()
-    else:
-        logger.warning(f"The output result of vad is empty: {in_path}")
-    return timestamps
+    try:
+        done = Path(os.path.join(save_path, "done"))
+        if done.exists():
+            return []
+        vad_model.reset_states()
+        timestamps = list(
+            vad_model.get_speech_timestamps(
+                in_path,
+                save_path=save_path,
+                flat_layout=False,
+                speech_pad_ms=speech_pad_ms,
+                min_silence_duration_ms=min_silence_duration_ms,
+            )
+        )
+        if done.parent.exists():
+            done.touch()
+        else:
+            logger.warning(f"The output result of vad is empty: {in_path}")
+        return timestamps
+    except Exception as e:
+        error_log = save_path.with_suffix(".log")
+        with open(error_log, "w") as fout:
+            fout.write(f"{in_path}\n{e}\n")
 
 
-def process_audios(in_paths, out_paths, processor, overwrite, num_workers):
+def denoise(in_path, out_path):
     """
-    Process audio files concurrently.
+    Denoise an audio file.
 
     Args:
-        in_paths: input audio files.
-        output_paths: output audio files.
-        processor: processor function.
-        overwrite: overwrite outputs.
-        num_workers: number of workers to use.
+        in_path: input audio file.
+        out_path: output audio file.
+    Returns:
+        speech_probs: speech probabilities
     """
-    args = []
-    for in_path, out_path in zip(in_paths, out_paths):
-        out_path = out_path.with_stem(in_path.stem)
-        if overwrite or not out_path.is_file() or not out_path.exists():
-            args.append([in_path, out_path])
-    if len(args) > 0:
-        thread_map(processor, *zip(*args), max_workers=num_workers)
+    try:
+        info = sf.info(in_path)
+        denoiser = RNNoise(info.samplerate, info.channels)
+        return list(denoiser.process_wav(in_path, out_path))
+    except Exception as e:
+        error_log = out_path.with_suffix(".log")
+        with open(error_log, "w") as fout:
+            fout.write(f"{in_path}\n{e}\n")
 
 
 def to_mono(in_path, out_path):
@@ -266,13 +274,18 @@ def separate_audios(in_paths, out_paths, overwrite):
         instrumental = out_path.with_stem(f"{in_path.stem}_(Instrumental)_{model_name}")
         vocals = out_path.with_stem(f"{in_path.stem}_(Vocals)_{model_name}")
         if not out_path.exists() or overwrite:
-            paths = separator.separate(in_path)
-            assert vocals.name == paths[0]
-            assert instrumental.name == paths[1]
-            os.remove(instrumental)
-            # convert the stereo vocals to mono
-            to_mono(vocals, out_path)
-            os.remove(vocals)
+            try:
+                paths = separator.separate(in_path)
+                assert vocals.name == paths[0]
+                assert instrumental.name == paths[1]
+                os.remove(instrumental)
+                # convert the stereo vocals to mono
+                to_mono(vocals, out_path)
+                os.remove(vocals)
+            except Exception as e:
+                error_log = out_path.with_suffix(".log")
+                with open(error_log, "w") as fout:
+                    fout.write(f"{in_path}\n{e}\n")
 
 
 def paraformer_transcribe(in_wav, out_txt, model, batch_size):
@@ -285,12 +298,17 @@ def paraformer_transcribe(in_wav, out_txt, model, batch_size):
         model: funasr auto model.
         batch_size: batch size for decoding.
     """
-    segments = model.generate(in_wav, batch_size_s=batch_size)
-    text = ""
-    for segment in segments:
-        text += segment["text"]
-    with open(out_txt, "w", encoding="utf-8") as fout:
-        fout.write(f"{in_wav}\t{text}\n")
+    try:
+        segments = model.generate(str(in_wav), batch_size_s=batch_size)
+        text = ""
+        for segment in segments:
+            text += segment["text"]
+        with open(out_txt, "w", encoding="utf-8") as fout:
+            fout.write(f"{in_wav}\t{text}\n")
+    except Exception as e:
+        error_log = out_txt.with_suffix(".log")
+        with open(error_log, "w") as fout:
+            fout.write(f"{in_wav}\n{e}\n")
 
 
 def whisper_transcribe(in_wav, out_txt, model, language, batch_size):
@@ -304,59 +322,96 @@ def whisper_transcribe(in_wav, out_txt, model, language, batch_size):
         language: language spoken in the audio.
         batch_size: batch size for decoding.
     """
-    audio = whisperx.load_audio(in_wav)
-    segments = model.transcribe(audio, language=language, batch_size=batch_size)[
-        "segments"
-    ]
-    text = ""
-    for segment in segments:
-        text += segment["text"]
-    with open(out_txt, "w", encoding="utf-8") as fout:
-        if language == "zh":
-            text = converter.convert(text)
-            text = normalizer.normalize(text)
-        fout.write(f"{in_wav}\t{text}\n")
+    try:
+        audio = whisperx.load_audio(in_wav)
+        segments = model.transcribe(audio, language=language, batch_size=batch_size)[
+            "segments"
+        ]
+        text = ""
+        for segment in segments:
+            text += segment["text"]
+        with open(out_txt, "w", encoding="utf-8") as fout:
+            if language == "zh":
+                text = converter.convert(text)
+                text = normalizer.normalize(text)
+            fout.write(f"{in_wav}\t{text}\n")
+    except Exception as e:
+        error_log = out_txt.with_suffix(".log")
+        with open(error_log, "w") as fout:
+            fout.write(f"{in_wav}\n{e}\n")
 
 
-def pyannote_speakers(in_wav, out_txt):
-    num_speakers = pyannote_model.get_num_speakers(in_wav)
-    with open(out_txt, "w", encoding="utf-8") as fout:
-        fout.write(f"{in_wav}\t{num_speakers}\n")
+def language_detection(in_wav, out_txt):
+    try:
+        global lre_pipeline
+        if lre_pipeline is None:
+            lre_pipeline = pipeline(
+                task="speech-language-recognition",
+                model="iic/speech_campplus_five_lre_16k",
+            )
+        audio, _ = librosa.load(in_wav, sr=16000)
+        language = lre_pipeline([audio])["text"][0]
+        with open(out_txt, "w", encoding="utf-8") as fout:
+            fout.write(f"{in_wav}\t{language}\n")
+    except Exception as e:
+        error_log = out_txt.with_suffix(".log")
+        with open(error_log, "w") as fout:
+            fout.write(f"{in_wav}\nDetect language failed.\n")
 
 
 def panns_tags(in_wav, out_txt):
-    audio, sample_rate = sf.read(in_wav)
-    clipwise_output, _ = panns_model.inference(audio[None, :])
-    clipwise_output = clipwise_output[0]
-    sorted_indexes = np.argsort(clipwise_output)[::-1]
-    with open(out_txt, "w", encoding="utf-8") as fout:
-        tags = ""
-        labels = np.array(panns_labels)
-        # 0. Speech
-        # 1. Male speech, man speaking
-        # 2. Female speech, woman speaking
-        # 3. Child speech, kid speaking
-        # 4. Conversation
-        # 5. Narration, monologue
-        # 7 - 526: Non speech
-        for k in range(3):
-            index = sorted_indexes[k]
-            tags += f" {panns_labels[index]}:{clipwise_output[index]:.2f}"
-        fout.write(f"{in_wav}\t{tags}\n")
+    try:
+        audio, sample_rate = sf.read(in_wav)
+        clipwise_output, _ = panns_model.inference(audio[None, :])
+        clipwise_output = clipwise_output[0]
+        sorted_indexes = np.argsort(clipwise_output)[::-1]
+        with open(out_txt, "w", encoding="utf-8") as fout:
+            tags = ""
+            labels = np.array(panns_labels)
+            # 0. Speech
+            # 1. Male speech, man speaking
+            # 2. Female speech, woman speaking
+            # 3. Child speech, kid speaking
+            # 4. Conversation
+            # 5. Narration, monologue
+            # 7 - 526: Non speech
+            for k in range(3):
+                index = sorted_indexes[k]
+                tags += f" {panns_labels[index]}:{clipwise_output[index]:.2f}"
+            fout.write(f"{in_wav}\t{tags.strip()}\n")
+    except Exception as e:
+        error_log = out_txt.with_suffix(".log")
+        with open(error_log, "w") as fout:
+            fout.write(f"{in_wav}\n{e}\n")
 
 
-def transcribe_audios(wav_scp, processor, overwrite, num_workers, batch_size=1):
+def pyannote_speakers(in_wav, out_txt):
+    try:
+        num_speakers = pyannote_model.get_num_speakers(in_wav)
+        with open(out_txt, "w", encoding="utf-8") as fout:
+            fout.write(f"{in_wav}\t{num_speakers}\n")
+    except:
+        error_log = out_txt.with_suffix(".log")
+        with open(error_log, "w") as fout:
+            fout.write(f"{in_wav}\nGet num of speakers failed.\n")
+
+
+def process_audios(
+    in_paths, out_paths, processor, overwrite, num_workers, batch_size=1
+):
     """
-    Transcribe audio files using Paraformer or Whisper.
+    Process audio files using Paraformer or Whisper.
 
     Args:
-        wav_scp: input wav scp, each line contains the path to the audio file.
+        in_paths: input audio files.
+        output_paths: output text files.
         processor: processor function.
         overwrite: overwrite outputs.
         num_workers: number of workers to use.
         batch_size: batch size for transcribing.
     """
-    suffix = processor.__name__.split("_")[0]
+    func = processor.func if isinstance(processor, partial) else processor
+    suffix = func.__name__.split("_")[0]
 
     global converter
     global normalizer
@@ -389,11 +444,8 @@ def transcribe_audios(wav_scp, processor, overwrite, num_workers, batch_size=1):
         pyannote_model = PyannoteONNX()
 
     args = []
-    for line in open(wav_scp, encoding="utf-8"):
-        in_wav = Path(line.strip())
-        out_txt = in_wav.with_suffix(f".{suffix}.txt")
-        if out_txt.exists() and not overwrite:
-            continue
-        args.append([str(in_wav), str(out_txt)])
+    for in_path, out_path in zip(in_paths, out_paths):
+        if overwrite or not out_path.is_file() or not out_path.exists():
+            args.append([in_path, out_path])
     if len(args) > 0:
         thread_map(processor, *zip(*args), max_workers=num_workers, desc=suffix)

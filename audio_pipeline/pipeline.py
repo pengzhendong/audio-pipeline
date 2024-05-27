@@ -34,7 +34,9 @@ import utils
 @click.option("--extract/--no-extract", default=True, help="Extract audio with ffmpeg")
 @click.option("--loudnorm/--no-loudnorm", default=True, help="Loudnorm audios")
 @click.option("--vad/--no-vad", default=True, help="Slice long audios into slices")
-@click.option("--separate/--no-separate", default=False, help="Separate vocals of slices")
+@click.option(
+    "--separate/--no-separate", default=False, help="Separate vocals of slices"
+)
 @click.option("--denoise/--no-denoise", default=False, help="Denoise audio slices")
 def main(
     in_dir,
@@ -88,10 +90,7 @@ def main(
         in_paths, out_paths = utils.generate_paths(in_dir, denoised, recursive, clean)
         utils.process_audios(in_paths, out_paths, utils.denoise, overwrite, num_workers)
         in_dir = denoised
-
-
     logger.info("Done!")
-    logger.info(f"Output directory: {out_dir}")
 
 
 if __name__ == "__main__":
