@@ -23,13 +23,13 @@ import librosa
 import numpy as np
 import pyloudnorm as pyln
 import soundfile as sf
+from df.enhance import enhance, init_df, load_audio, save_audio
 from funasr import AutoModel
 from loguru import logger
 from modelscope.pipelines import pipeline
 from panns_inference import AudioTagging, labels
 from pyannote_onnx import PyannoteONNX
 from pydub import AudioSegment
-from pyrnnoise import RNNoise
 from silero_vad import SileroVAD
 from tqdm.contrib.concurrent import thread_map
 
@@ -37,12 +37,10 @@ from tqdm.contrib.concurrent import thread_map
 AUDIO = "aac|alac|flac|m4a|m4b|m4p|mp3|mp4a|ogg|opus|wav|wma"
 VIDEO = "avi|flv|m4v|mkv|mov|mp4|mpeg|mpg|wmv"
 
+df_model, df_state = None, None
 lre_pipeline = None
-converter = None
-normalizer = None
 panns_model = None
 pyannote_model = None
-separator = None
 vad_model = SileroVAD()
 panns_labels = []
 for label in labels:
@@ -230,65 +228,16 @@ def denoise(in_path, out_path):
         speech_probs: speech probabilities
     """
     try:
-        info = sf.info(in_path)
-        denoiser = RNNoise(info.samplerate, info.channels)
-        return list(denoiser.process_wav(in_path, out_path))
+        audio, _ = load_audio(in_path, sr=df_state.sr())
+        enhanced = enhance(df_model, df_state, audio)
+        save_audio(out_path, enhanced, df_state.sr())
     except Exception as e:
         error_log = out_path.with_suffix(".log")
         with open(error_log, "w") as fout:
             fout.write(f"{in_path}\n{e}\n")
 
 
-def to_mono(in_path, out_path):
-    """
-    Extract a mono audio from a multi-channel audio file.
-
-    Args:
-        in_path: The input stereo audio file.
-        out_path: The output mono audio file.
-    """
-    AudioSegment.from_wav(in_path).set_channels(1).export(out_path, format="wav")
-
-
-def separate_audios(in_paths, out_paths, overwrite):
-    """
-    Separate audio files to mono vocals.
-
-    Args:
-        in_paths: input audio files.
-        output_paths: output audio files.
-        overwrite: overwrite outputs.
-    """
-    global separator
-    if separator is None:
-        from audio_separator.separator import Separator
-
-        separator = Separator()
-        separator.load_model()
-        # separator.load_model(model_filename="Kim_Vocal_1.onnx")
-    model_name = separator.model_instance.model_name
-
-    for in_path, out_path in zip(in_paths, out_paths):
-        # change the output_dir of the separator
-        separator.model_instance.output_dir = out_path.parent
-        instrumental = out_path.with_stem(f"{in_path.stem}_(Instrumental)_{model_name}")
-        vocals = out_path.with_stem(f"{in_path.stem}_(Vocals)_{model_name}")
-        if not out_path.exists() or overwrite:
-            try:
-                paths = separator.separate(in_path)
-                assert vocals.name == paths[0]
-                assert instrumental.name == paths[1]
-                os.remove(instrumental)
-                # convert the stereo vocals to mono
-                to_mono(vocals, out_path)
-                os.remove(vocals)
-            except Exception as e:
-                error_log = out_path.with_suffix(".log")
-                with open(error_log, "w") as fout:
-                    fout.write(f"{in_path}\n{e}\n")
-
-
-def paraformer_transcribe(in_wav, out_txt, model, batch_size):
+def transcribe(in_wav, out_txt, model, batch_size):
     """
     Transcribe audio files using Paraformer.
 
@@ -304,36 +253,6 @@ def paraformer_transcribe(in_wav, out_txt, model, batch_size):
         for segment in segments:
             text += segment["text"]
         with open(out_txt, "w", encoding="utf-8") as fout:
-            fout.write(f"{in_wav}\t{text}\n")
-    except Exception as e:
-        error_log = out_txt.with_suffix(".log")
-        with open(error_log, "w") as fout:
-            fout.write(f"{in_wav}\n{e}\n")
-
-
-def whisper_transcribe(in_wav, out_txt, model, language, batch_size):
-    """
-    Transcribe audio files using Whisper.
-
-    Args:
-        in_wav: input audio file.
-        out_txt: output text file.
-        model: whisper model.
-        language: language spoken in the audio.
-        batch_size: batch size for decoding.
-    """
-    try:
-        audio = whisperx.load_audio(in_wav)
-        segments = model.transcribe(audio, language=language, batch_size=batch_size)[
-            "segments"
-        ]
-        text = ""
-        for segment in segments:
-            text += segment["text"]
-        with open(out_txt, "w", encoding="utf-8") as fout:
-            if language == "zh":
-                text = converter.convert(text)
-                text = normalizer.normalize(text)
             fout.write(f"{in_wav}\t{text}\n")
     except Exception as e:
         error_log = out_txt.with_suffix(".log")
@@ -413,30 +332,17 @@ def process_audios(
     func = processor.func if isinstance(processor, partial) else processor
     suffix = func.__name__.split("_")[0]
 
-    global converter
-    global normalizer
+    global df_model, df_state
     global panns_model
     global pyannote_model
-    if suffix == "paraformer":
+    if suffix == "transcribe":
         model = AutoModel(
             model="paraformer-zh", vad_model="fsmn-vad", punc_model="ct-punc-c"
         )
         processor = partial(processor, model=model, batch_size=batch_size)
-    elif suffix == "whisper":
-        if converter is None:
-            from pyopenhc import OpenHC
-
-            converter = OpenHC("t2s")
-        if normalizer is None:
-            from tn.chinese.normalizer import Normalizer
-
-            normalizer = Normalizer()
-        import whisperx
-
-        model = whisperx.load_model("large-v3", "cuda", compute_type="float16")
-        processor = partial(
-            whisper_transcribe, model=model, batch_size=batch_size, language="zh"
-        )
+    elif suffix == "denoise" and df_model is None:
+        # df_model, df_state, _ = init_df()
+        df_model, df_state, _ = init_df("DeepFilterNet3/")
     elif suffix == "panns" and panns_model is None:
         panns_model = AudioTagging()
         # panns_model = AudioTagging("panns_data/Cnn14_mAP=0.431.pth")

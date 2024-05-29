@@ -34,9 +34,6 @@ import utils
 @click.option("--extract/--no-extract", default=True, help="Extract audio with ffmpeg")
 @click.option("--loudnorm/--no-loudnorm", default=True, help="Loudnorm audios")
 @click.option("--vad/--no-vad", default=True, help="Slice long audios into slices")
-@click.option(
-    "--separate/--no-separate", default=False, help="Separate vocals of slices"
-)
 @click.option("--denoise/--no-denoise", default=False, help="Denoise audio slices")
 def main(
     in_dir,
@@ -51,7 +48,6 @@ def main(
     extract,
     loudnorm,
     vad,
-    separate,
     denoise,
 ):
     if extract:
@@ -78,12 +74,6 @@ def main(
         vad = partial(utils.vad, speech_pad_ms=30, min_silence_duration_ms=100)
         utils.process_audios(in_paths, save_paths, vad, overwrite, num_workers)
         in_dir = slices
-
-    if separate:
-        vocals = f"{out_dir}/vocals"
-        in_paths, out_paths = utils.generate_paths(in_dir, vocals, recursive, clean)
-        utils.separate_audios(in_paths, out_paths, overwrite)
-        in_dir = vocals
 
     if denoise:
         denoised = f"{out_dir}/denoised"

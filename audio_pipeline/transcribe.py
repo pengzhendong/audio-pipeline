@@ -27,12 +27,6 @@ import utils
     default="paraformer",
     help="ASR model",
 )
-@click.option(
-    "--language",
-    type=click.Choice(["en", "zh"]),
-    default="zh",
-    help="ASR language",
-)
 @click.option("--asr/--no-asr", default=True, help="Do ASR")
 @click.option("--batch_size", default=16, help="Batch size for ASR")
 @click.option("--detect-lang/--no-detect-lang", default=False, help="Detect language")
@@ -46,7 +40,6 @@ def main(
     in_dir,
     out_dir,
     model,
-    language,
     asr,
     detect_lang,
     panns,
@@ -58,18 +51,16 @@ def main(
     batch_size,
 ):
     if asr:
-        if model == "paraformer":
-            in_paths, out_paths = utils.generate_paths(
-                in_dir, f"{out_dir}/asr", recursive, clean, ".paraformer.txt"
-            )
-            processor = utils.paraformer_transcribe
-        elif model == "whisper":
-            in_paths, out_paths = utils.generate_paths(
-                in_dir, f"{out_dir}/asr", recursive, clean, ".whisper.txt"
-            )
-            processor = utils.whisper_transcribe
+        in_paths, out_paths = utils.generate_paths(
+            in_dir, f"{out_dir}/asr", recursive, clean, ".paraformer.txt"
+        )
         utils.process_audios(
-            in_paths, out_paths, processor, overwrite, num_workers, batch_size
+            in_paths,
+            out_paths,
+            utils.transcribe,
+            overwrite,
+            num_workers,
+            batch_size,
         )
     if detect_lang:
         in_paths, out_paths = utils.generate_paths(

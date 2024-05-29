@@ -2,11 +2,11 @@
 
 1. pipeline
   - ffmpeg extract
-  - loudnorm
-  - vad slice
-  - uvr seperate
-  - rnnoise denoise
+  - pyloudnorm loudnorm
+  - silero-vad slice
+  - deepfilternet denoise
 2. transcribe
-  - paraformer vs. whisperx
+  - paraformer
+  - cam++ language detection
   - panns audio tags
   - pyannote num of speakers
