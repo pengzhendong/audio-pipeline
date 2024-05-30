@@ -24,6 +24,7 @@ import pyloudnorm as pyln
 import soundfile as sf
 from df.enhance import enhance, init_df, load_audio, save_audio
 from funasr import AutoModel
+from modelscope.hub.snapshot_download import snapshot_download
 from modelscope.pipelines import pipeline
 from panns_inference import AudioTagging, labels
 from pyannote_onnx import PyannoteONNX
@@ -31,7 +32,8 @@ from silero_vad import SileroVAD
 from tqdm import tqdm
 from tqdm.contrib.concurrent import thread_map
 
-import utils
+
+from utils import format_exception
 
 
 panns_labels = []
@@ -62,9 +64,8 @@ def extract(in_path, out_path, stream=0, channel=0, sampling_rate=None):
         stream = ffmpeg.overwrite_output(stream)
         ffmpeg.run(stream)
     except Exception as e:
-        error_log = out_path.with_suffix(".log")
-        with open(error_log, "w") as fout:
-            fout.write(f"{in_path}\n{e}\n")
+        with open(Path(out_path).with_suffix(".log"), "w+") as fout:
+            fout.write(f"{in_path}\n{format_exception(e)}\n")
 
 
 def loudnorm(in_path, out_path, peak=-1.0, loudness=-23.0, block_size=0.400):
@@ -89,9 +90,8 @@ def loudnorm(in_path, out_path, peak=-1.0, loudness=-23.0, block_size=0.400):
         audio = pyln.normalize.loudness(audio, loudness, loudness)
         sf.write(out_path, audio, sample_rate)
     except Exception as e:
-        error_log = out_path.with_suffix(".log")
-        with open(error_log, "w") as fout:
-            fout.write(f"{in_path}\n{e}\n")
+        with open(Path(out_path).with_suffix(".log"), "w+") as fout:
+            fout.write(f"{in_path}\n{format_exception(e)}\n")
 
 
 def vad(
@@ -121,13 +121,13 @@ def vad(
         )
         with open(out_json, "w", encoding="utf-8") as fout:
             json.dump(
-                {"wav": str(in_path.resolve()), "timestamps": timestamps},
+                {"wav": str(Path(in_path).resolve()), "timestamps": timestamps},
                 fout,
                 ensure_ascii=False,
             )
     except Exception as e:
-        with open(out_json.with_suffix(".log"), "w") as fout:
-            fout.write(f"{in_path}\n{e}\n")
+        with open(Path(out_json).with_suffix(".log"), "w+") as fout:
+            fout.write(f"{in_path}\n{format_exception(e)}\n")
 
 
 def denoise(in_path, save_path, overwrite):
@@ -140,8 +140,8 @@ def denoise(in_path, save_path, overwrite):
         overwrite: overwrite outputs.
     """
     try:
-        df_model, df_state, _ = init_df()
-        # df_model, df_state, _ = init_df("DeepFilterNet3/")
+        repo_dir = snapshot_download("pengzhendong/DeepFilterNet")
+        df_model, df_state, _ = init_df(f"{repo_dir}/DeepFilterNet3")
 
         data = json.load(open(in_path, encoding="utf-8"))
         progress_bar = tqdm(
@@ -161,9 +161,8 @@ def denoise(in_path, save_path, overwrite):
             enhanced = enhance(df_model, df_state, audio[:, start:end])
             save_audio(slice_path, enhanced, df_state.sr())
     except Exception as e:
-        error_log = save_path.with_suffix(".log")
-        with open(error_log, "w") as fout:
-            fout.write(f"{in_path}\n{e}\n")
+        with open(Path(save_path).with_suffix(".log"), "w+") as fout:
+            fout.write(f"{in_path}\n{format_exception(e)}\n")
 
 
 def transcribe(in_path, out_json):
@@ -175,15 +174,14 @@ def transcribe(in_path, out_json):
         out_json: output json file.
     """
     try:
-        asr_model = AutoModel(
-            model="paraformer-zh", vad_model="fsmn-vad", punc_model="ct-punc-c"
-        )
+        asr_model = AutoModel(model="paraformer-zh")
+        punct_model = AutoModel(model="ct-punc")
         lre_pipeline = pipeline(
             task="speech-language-recognition",
             model="iic/speech_campplus_five_lre_16k",
         )
-        panns_model = AudioTagging()
-        # panns_model = AudioTagging(checkpoint_path="panns_data/Cnn14_mAP=0.431.pth")
+        repo_dir = snapshot_download("pengzhendong/panns")
+        panns_model = AudioTagging(checkpoint_path=f"{repo_dir}/Cnn14_mAP=0.431.pth")
         pyannote_model = PyannoteONNX()
 
         data = json.load(open(in_path, encoding="utf-8"))
@@ -194,7 +192,8 @@ def transcribe(in_path, out_json):
             end = int(timestamp["end"] * sr)
             audios.append(audio[start:end])
 
-        segments = asr_model.generate(audios)
+        texts = [seg["text"].replace(" ", "") for seg in asr_model.generate(audios)]
+        texts = [seg["text"].strip() for seg in punct_model.generate(texts)]
         languages = lre_pipeline(audios)["text"]
         tags_list = []
         num_speakers_list = []
@@ -217,24 +216,24 @@ def transcribe(in_path, out_json):
                 tags[panns_labels[index]] = round(float(clipwise_output[index]), 2)
             tags_list.append(tags)
         if (
-            len(segments) != len(audios)
+            len(texts) != len(audios)
             or len(languages) != len(audios)
             or len(num_speakers_list) != len(audios)
             or len(tags_list) != len(audios)
         ):
             raise ValueError("Number of segments does not match number of timestamps.")
-        for idx, (segment, language, speakers, tags) in enumerate(
-            zip(segments, languages, num_speakers_list, tags_list)
+        for idx, (text, language, num_speakers, tags) in enumerate(
+            zip(texts, languages, num_speakers_list, tags_list)
         ):
-            data["timestamps"][idx]["text"] = segment["text"].strip()
+            data["timestamps"][idx]["text"] = text
             data["timestamps"][idx]["language"] = language
-            data["timestamps"][idx]["speakers"] = speakers
+            data["timestamps"][idx]["num_speakers"] = num_speakers
             data["timestamps"][idx]["tags"] = tags
         with open(out_json, "w", encoding="utf-8") as fout:
             json.dump(data, fout, ensure_ascii=False)
     except Exception as e:
-        with open(out_json.with_suffix(".log"), "w") as fout:
-            fout.write(f"{in_path}\n{e}\n")
+        with open(Path(out_json).with_suffix(".log"), "w+") as fout:
+            fout.write(f"{in_path}\n{format_exception(e)}\n")
 
 
 def process_audios(in_paths, out_paths, processor, overwrite, num_workers):

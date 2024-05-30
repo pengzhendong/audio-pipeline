@@ -114,3 +114,9 @@ def generate_paths(
         in_paths.append(in_path)
         out_paths.append(out_path)
     return in_paths, out_paths
+
+
+def format_exception(exception):
+    file_path = exception.__traceback__.tb_frame.f_code.co_filename
+    line_no = exception.__traceback__.tb_lineno
+    return f"{exception.__class__.__name__}: {exception} at {file_path}:{line_no}"

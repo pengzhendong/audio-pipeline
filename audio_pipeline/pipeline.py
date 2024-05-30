@@ -82,6 +82,14 @@ def main(
         processor.process_audios(in_paths, out_paths, vad, overwrite, num_workers)
         in_dir = slices
 
+    if denoise:
+        denoised = f"{out_dir}/denoised"
+        in_paths, out_paths = generate_paths(
+            in_dir, denoised, recursive, clean, "json", output_suffix=""
+        )
+        denoise = partial(processor.denoise, overwrite=overwrite)
+        processor.process_audios(in_paths, out_paths, denoise, overwrite, num_workers)
+
     # transcribe the original audio before denoising
     # 1. text
     # 2. language
@@ -95,14 +103,6 @@ def main(
         processor.process_audios(
             in_paths, out_paths, processor.transcribe, overwrite, num_workers
         )
-
-    if denoise:
-        denoised = f"{out_dir}/denoised"
-        in_paths, out_paths = generate_paths(
-            in_dir, denoised, recursive, clean, "json", output_suffix=""
-        )
-        denoise = partial(processor.denoise, overwrite=overwrite)
-        processor.process_audios(in_paths, out_paths, denoise, overwrite, num_workers)
 
     logger.info("Done!")
 
