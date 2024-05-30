@@ -6,7 +6,7 @@
   - silero-vad slice
   - deepfilternet denoise
 2. transcribe
-  - paraformer
+  - paraformer asr
   - cam++ language detection
-  - panns audio tags
   - pyannote num of speakers
+  - panns audio tags
