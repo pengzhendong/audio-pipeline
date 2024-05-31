@@ -36,6 +36,8 @@ from tqdm.contrib.concurrent import thread_map
 from utils import format_exception
 
 
+df_repo_dir = snapshot_download("pengzhendong/DeepFilterNet")
+panns_repo_dir = snapshot_download("pengzhendong/panns")
 panns_labels = []
 for label in labels:
     label = label.lower().split(", ")[0].replace(" ", "_")
@@ -130,7 +132,7 @@ def vad(
             fout.write(f"{in_path}\n{format_exception(e)}\n")
 
 
-def denoise(in_path, save_path, overwrite):
+def denoise(in_path, save_path, overwrite=False):
     """
     Denoise an audio file.
 
@@ -140,8 +142,7 @@ def denoise(in_path, save_path, overwrite):
         overwrite: overwrite outputs.
     """
     try:
-        repo_dir = snapshot_download("pengzhendong/DeepFilterNet")
-        df_model, df_state, _ = init_df(f"{repo_dir}/DeepFilterNet3")
+        df_model, df_state, _ = init_df(f"{df_repo_dir}/DeepFilterNet3")
 
         data = json.load(open(in_path, encoding="utf-8"))
         progress_bar = tqdm(
@@ -180,8 +181,9 @@ def transcribe(in_path, out_json):
             task="speech-language-recognition",
             model="iic/speech_campplus_five_lre_16k",
         )
-        repo_dir = snapshot_download("pengzhendong/panns")
-        panns_model = AudioTagging(checkpoint_path=f"{repo_dir}/Cnn14_mAP=0.431.pth")
+        panns_model = AudioTagging(
+            checkpoint_path=f"{panns_repo_dir}/Cnn14_mAP=0.431.pth"
+        )
         pyannote_model = PyannoteONNX()
 
         data = json.load(open(in_path, encoding="utf-8"))
@@ -199,21 +201,22 @@ def transcribe(in_path, out_json):
         num_speakers_list = []
         for audio in audios:
             num_speakers_list.append(pyannote_model.get_num_speakers(audio))
-            clipwise_output, _ = panns_model.inference(audio[None, :])
-            clipwise_output = clipwise_output[0]
-            sorted_indexes = np.argsort(clipwise_output)[::-1]
-            labels = np.array(panns_labels)
-            # 0. Speech
-            # 1. Male speech, man speaking
-            # 2. Female speech, woman speaking
-            # 3. Child speech, kid speaking
-            # 4. Conversation
-            # 5. Narration, monologue
-            # 7 - 526: Non speech
             tags = {}
-            for k in range(5):
-                index = sorted_indexes[k]
-                tags[panns_labels[index]] = round(float(clipwise_output[index]), 2)
+            # panns requires audio length to be larger than 9920 samples (620ms)
+            if len(audio) >= 9920:
+                clipwise_output, _ = panns_model.inference(audio[None, :])
+                clipwise_output = clipwise_output[0]
+                sorted_indexes = np.argsort(clipwise_output)[::-1]
+                # 0. Speech
+                # 1. Male speech, man speaking
+                # 2. Female speech, woman speaking
+                # 3. Child speech, kid speaking
+                # 4. Conversation
+                # 5. Narration, monologue
+                # 7 - 526: Non speech
+                for k in range(5):
+                    index = sorted_indexes[k]
+                    tags[panns_labels[index]] = round(float(clipwise_output[index]), 2)
             tags_list.append(tags)
         if (
             len(texts) != len(audios)
