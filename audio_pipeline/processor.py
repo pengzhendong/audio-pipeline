@@ -14,6 +14,7 @@
 
 import json
 import os
+import re
 from functools import partial
 from pathlib import Path
 
@@ -194,8 +195,16 @@ def transcribe(in_path, out_json):
             end = int(timestamp["end"] * sr)
             audios.append(audio[start:end])
 
-        texts = [seg["text"].replace(" ", "") for seg in asr_model.generate(audios)]
-        texts = [seg["text"].strip() for seg in punct_model.generate(texts)]
+        texts = []
+        space_patten = re.compile(r'([\u4e00-\u9fa5])\s+([\u4e00-\u9fa5])')
+        for seg in asr_model.generate(audios):
+            text = seg["text"].strip()
+            text = space_patten.sub(r'\1\2', text)
+            text = space_patten.sub(r'\1\2', text)
+            if text != "":
+                text = punct_model.generate(text)[0]["text"]
+            texts.append(text)
+
         languages = lre_pipeline(audios)["text"]
         tags_list = []
         num_speakers_list = []
