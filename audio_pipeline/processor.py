@@ -188,32 +188,29 @@ def transcribe(in_path, out_json):
         pyannote_model = PyannoteONNX()
 
         data = json.load(open(in_path, encoding="utf-8"))
-        audios = []
-        audio, sr = librosa.load(data["wav"], sr=16000)
+        long_audio_16k, _ = librosa.load(data["wav"], sr=16000)
+        long_audio_32k, _ = librosa.load(data["wav"], sr=32000)
+        space_patten = re.compile(r"([\u4e00-\u9fa5])\s+([\u4e00-\u9fa5])")
         for idx, timestamp in enumerate(data["timestamps"]):
-            start = int(timestamp["start"] * sr)
-            end = int(timestamp["end"] * sr)
-            audios.append(audio[start:end])
+            start = int(timestamp["start"] * 16000)
+            end = int(timestamp["end"] * 16000)
+            audio_16k = long_audio_16k[start:end]
+            audio_32k = long_audio_32k[start * 2 : end * 2]
 
-        texts = []
-        space_patten = re.compile(r'([\u4e00-\u9fa5])\s+([\u4e00-\u9fa5])')
-        for seg in asr_model.generate(audios):
-            text = seg["text"].strip()
-            text = space_patten.sub(r'\1\2', text)
-            text = space_patten.sub(r'\1\2', text)
+            text = asr_model.generate(audio_16k)[0].get("text", "").strip()
+            text = space_patten.sub(r"\1\2", text)
+            text = space_patten.sub(r"\1\2", text)
             if text != "":
-                text = punct_model.generate(text)[0]["text"]
-            texts.append(text)
-
-        languages = lre_pipeline(audios)["text"]
-        tags_list = []
-        num_speakers_list = []
-        for audio in audios:
-            num_speakers_list.append(pyannote_model.get_num_speakers(audio))
+                text = punct_model.generate(text)[0].get("text", "").strip()
+            data["timestamps"][idx]["text"] = text
+            data["timestamps"][idx]["language"] = lre_pipeline([audio_16k]).get("text", [])[0]
+            data["timestamps"][idx]["num_speakers"] = pyannote_model.get_num_speakers(
+                audio_16k
+            )
             tags = {}
-            # panns requires audio length to be larger than 9920 samples (620ms)
-            if len(audio) >= 9920:
-                clipwise_output, _ = panns_model.inference(audio[None, :])
+            # panns requires audio length to be larger than 9920 samples (310ms)
+            if len(audio_32k) >= 9920:
+                clipwise_output, _ = panns_model.inference(audio_32k[None, :])
                 clipwise_output = clipwise_output[0]
                 sorted_indexes = np.argsort(clipwise_output)[::-1]
                 # 0. Speech
@@ -226,20 +223,6 @@ def transcribe(in_path, out_json):
                 for k in range(5):
                     index = sorted_indexes[k]
                     tags[panns_labels[index]] = round(float(clipwise_output[index]), 2)
-            tags_list.append(tags)
-        if (
-            len(texts) != len(audios)
-            or len(languages) != len(audios)
-            or len(num_speakers_list) != len(audios)
-            or len(tags_list) != len(audios)
-        ):
-            raise ValueError("Number of segments does not match number of timestamps.")
-        for idx, (text, language, num_speakers, tags) in enumerate(
-            zip(texts, languages, num_speakers_list, tags_list)
-        ):
-            data["timestamps"][idx]["text"] = text
-            data["timestamps"][idx]["language"] = language
-            data["timestamps"][idx]["num_speakers"] = num_speakers
             data["timestamps"][idx]["tags"] = tags
         with open(out_json, "w", encoding="utf-8") as fout:
             json.dump(data, fout, ensure_ascii=False)
