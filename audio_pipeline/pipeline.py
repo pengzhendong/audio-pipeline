@@ -24,8 +24,8 @@ from utils import generate_paths
 
 
 @click.command()
-@click.argument("in_dir", type=click.Path(exists=True, file_okay=False))
-@click.argument("out_dir", type=click.Path(file_okay=False))
+@click.argument("in-dir", type=click.Path(exists=True, file_okay=False))
+@click.argument("out-dir", type=click.Path(file_okay=False))
 @click.option("--clean/--no-clean", default=False, help="Clean outputs before")
 @click.option("--overwrite/--no-overwrite", default=False, help="Overwrite outputs")
 @click.option("--recursive/--no-recursive", default=True, help="Search recursively")

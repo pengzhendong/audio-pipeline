@@ -8,6 +8,6 @@ modelscope[audio] -f https://modelscope.oss-cn-beijing.aliyuncs.com/releases/rep
 panns_inference
 pyannote-onnx
 pyloudnorm
-silero-vad
+pysilero
 soundfile
 tqdm

@@ -29,7 +29,7 @@ from modelscope.hub.snapshot_download import snapshot_download
 from modelscope.pipelines import pipeline
 from panns_inference import AudioTagging, labels
 from pyannote_onnx import PyannoteONNX
-from silero_vad import SileroVAD
+from pysilero import SileroVAD
 from tqdm import tqdm
 from tqdm.contrib.concurrent import thread_map
 
