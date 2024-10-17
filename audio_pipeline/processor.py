@@ -113,13 +113,14 @@ def vad(
     save_path = out_json.with_suffix("") if save_slices else None
     try:
         timestamps = list(
-            SileroVAD().get_speech_timestamps(
+            SileroVAD(
+                min_silence_duration_ms=min_silence_duration_ms,
+                speech_pad_ms=speech_pad_ms, 
+            ).get_speech_timestamps(
                 in_path,
                 save_path=save_path,
                 flat_layout=False,
-                return_seconds=True,
-                speech_pad_ms=speech_pad_ms,
-                min_silence_duration_ms=min_silence_duration_ms,
+                return_seconds=True,   
             )
         )
         with open(out_json, "w", encoding="utf-8") as fout:
